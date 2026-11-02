@@ -1,0 +1,7 @@
+services:
+  - type: web
+  name: sciptyy-api
+  runtime: python
+  plan: free
+  buildCommand: pip install -r requirements.txt
+  startCommand: python api.py

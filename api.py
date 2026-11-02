@@ -76,31 +76,21 @@ async def send_admin_log(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": 1494459013, "text": text, "parse_mode": "HTML"}
     try:
-        async with aiohttp.ClientSession() as session:
-            await session.post(url, json=payload)
-    except: pass
-
-async def api_profile(request):
+        async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
+    except: passasync def api_profile(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user["id"], user.get("username", "")))
     conn.commit()
-    
     profile = get_user(user["id"])
     cursor.execute("SELECT item_name, price, date FROM purchases WHERE user_id = ? ORDER BY id DESC LIMIT 10", (user["id"],))
     purchases = [{"name": r[0], "price": r[1], "date": r[2]} for r in cursor.fetchall()]
-    
     cursor.execute("SELECT country, amount FROM stock")
     stock_dict = {row[0]: row[1] for row in cursor.fetchall()}
-    
-    shop_items = []
-    for code, info in COUNTRIES.items():
-        shop_items.append({"code": code, "name": info["name"], "price": info["price"], "stock": stock_dict.get(code, 0)})
-    
+    shop_items = [{"code": k, "name": v["name"], "price": v["price"], "stock": stock_dict.get(k, 0)} for k, v in COUNTRIES.items()]
     tickets = []
     if user["id"] in ADMIN_IDS:
         cursor.execute("SELECT id, user_id, username, question, answer FROM tickets WHERE answer IS NULL ORDER BY id DESC")
@@ -108,45 +98,8 @@ async def api_profile(request):
     else:
         cursor.execute("SELECT id, question, answer FROM tickets WHERE user_id = ? ORDER BY id DESC", (user["id"],))
         tickets = [{"id": r[0], "question": r[1], "answer": r[2]} for r in cursor.fetchall()]
-        
     conn.close()
     return web.json_response({"status": "ok", "profile": profile, "purchases": purchases, "shop": shop_items, "is_admin": user["id"] in ADMIN_IDS, "tickets": tickets})
-
-async def api_create_ticket(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    data = await request.json()
-    question = data.get("question", "").strip()
-    if not question: return web.json_response({"error": "Пустой вопрос"}, status=400)
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO tickets (user_id, username, question) VALUES (?, ?, ?)", (user["id"], user.get("username", ""), question))
-    conn.commit()
-    conn.close()
-    await send_admin_log(f"📩 <b>Новый тикет на сайте!</b>\n👤 @{user.get('username', '')}\n💬 {question}")
-    return web.json_response({"status": "ok", "message": "Тикет создан!"})
-
-async def api_reply_ticket(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
-    data = await request.json()
-    ticket_id = data.get("ticket_id")
-    answer = data.get("answer", "").strip()
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE tickets SET answer = ? WHERE id = ?", (answer, ticket_id))
-    cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
-    target_user = cursor.fetchone()
-    conn.commit()
-    conn.close()
-    if target_user:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": target_user[0], "text": f"💬 <b>Ответ поддержки:</b>\n{answer}", "parse_mode": "HTML"}
-        async with aiohttp.ClientSession() as session:
-            await session.post(url, json=payload)
-    return web.json_response({"status": "ok", "message": "Ответ отправлен!"})
 
 async def api_roll(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
@@ -163,16 +116,15 @@ async def api_roll(request):
     cursor.execute("UPDATE users SET balance = balance + ?, last_roll = ? WHERE user_id = ?", (amount, now, user["id"]))
     conn.commit()
     conn.close()
-    return web.json_response({"status": "ok", "prize": f"{amount} ₽", "amount": amount})async def api_buy(request):
+    return web.json_response({"status": "ok", "prize": f"{amount} ₽", "amount": amount})
+
+async def api_buy(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
     data = await request.json()
     country = data.get("country")
-    method = data.get("method")
-    
     if country not in COUNTRIES: return web.json_response({"error": "Товар не найден"}, status=404)
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT amount FROM stock WHERE country = ?", (country,))
@@ -180,52 +132,36 @@ async def api_roll(request):
     if not stock or stock[0] <= 0:
         conn.close()
         return web.json_response({"error": "Нет в наличии"}, status=400)
-        
     info = COUNTRIES[country]
     profile = get_user(user["id"])
-    
-    if method == "balance":
-        final_price = int(info['price'] * (1 - profile['discount'] / 100))
-        if final_price < 1: final_price = 1
-        if profile['balance'] < final_price:
-            conn.close()
-            return web.json_response({"error": "Недостаточно средств"}, status=400)
-        cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user["id"]))
-        cursor.execute("UPDATE stock SET amount = amount - 1 WHERE country = ?", (country,))
-        cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], info['name'], final_price))
-        conn.commit()
+    final_price = int(info['price'] * (1 - profile['discount'] / 100))
+    if final_price < 1: final_price = 1
+    if profile['balance'] < final_price:
         conn.close()
-        await send_admin_log(f"🛒 <b>Покупка (Сайт, Баланс)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n<i>Выдайте товар вручную!</i>")
-        return web.json_response({"status": "ok", "message": "Успешно куплено! Товар будет выдан вручную. Напишите в поддержку.", "item": info['name']})
-        
-    return web.json_response({"error": "Неверный метод"}, status=400)
+        return web.json_response({"error": "Недостаточно средств"}, status=400)
+    cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user["id"]))
+    cursor.execute("UPDATE stock SET amount = amount - 1 WHERE country = ?", (country,))
+    cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], info['name'], final_price))
+    conn.commit()
+    conn.close()
+    await send_admin_log(f"🛒 <b>Покупка (Сайт)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n<i>Выдайте товар вручную!</i>")
+    return web.json_response({"status": "ok", "message": "Успешно куплено!", "item": info['name']})
 
 async def api_buy_stars_invoice(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    
     data = await request.json()
     country = data.get("country")
     if country not in COUNTRIES: return web.json_response({"error": "Товар не найден"}, status=404)
-    
     info = COUNTRIES[country]
     stars = info.get("stars", info["price"])
-    
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
-    payload = {
-        "title": f"Аккаунт {info['name']}",
-        "description": "Оплата аккаунта. Товар будет выдан вручную.",
-        "payload": f"acc_stars_{country}",
-        "currency": "XTR",
-        "prices": [{"label": "Аккаунт", "amount": stars}]
-    }
-    
+    payload = {"title": f"Аккаунт {info['name']}", "description": "Оплата. Выдача вручную.", "payload": f"acc_stars_{country}", "currency": "XTR", "prices": [{"label": "Аккаунт", "amount": stars}]}
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as resp:
             res = await resp.json()
-            if res.get("ok"):
-                return web.json_response({"status": "ok", "url": res["result"]})
+            if res.get("ok"): return web.json_response({"status": "ok", "url": res["result"]})
             return web.json_response({"error": "Ошибка Telegram API"}, status=500)
 
 async def api_topup(request):
@@ -295,7 +231,32 @@ async def api_case_open(request):
     await send_admin_log(f"📦 <b>Кейс (Сайт)</b>\n👤 @{user.get('username', '')}\n🎁 {prize['value']}")
     return web.json_response({"status": "ok", "prize": prize})
 
-async def api_admin_money(request):
+async def api_promo_activate(request):
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    user = validate_init_data(init_data)
+    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
+    data = await request.json()
+    code = data.get("code", "").strip().upper()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT discount, limit_count, used_count FROM promos WHERE code = ?", (code,))
+    promo = cursor.fetchone()
+    if not promo:
+        conn.close()
+        return web.json_response({"error": "Такого промокода нет"}, status=400)
+    discount, limit_count, used_count = promo
+    if used_count >= limit_count:
+        conn.close()
+        return web.json_response({"error": "Лимит активаций исчерпан"}, status=400)
+    cursor.execute("SELECT * FROM user_promos WHERE user_id = ? AND code = ?", (user["id"], code))
+    if cursor.fetchone():
+        conn.close()
+        return web.json_response({"error": "Вы уже активировали этот код"}, status=400)
+    cursor.execute("UPDATE users SET discount = ? WHERE user_id = ?", (discount, user["id"]))
+    cursor.execute("INSERT INTO user_promos (user_id, code) VALUES (?, ?)", (user["id"], code))
+    cursor.execute("UPDATE promos SET used_count = used_count + 1 WHERE code = ?", (code,))
+    conn.commit()
+    conn.close()async def api_admin_money(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
@@ -342,33 +303,40 @@ async def api_admin_promo(request):
     conn.close()
     return web.json_response(res)
 
-async def api_promo_activate(request):
+async def api_create_ticket(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
     data = await request.json()
-    code = data.get("code", "").strip().upper()
+    question = data.get("question", "").strip()
+    if not question: return web.json_response({"error": "Пустой вопрос"}, status=400)
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT discount, limit_count, used_count FROM promos WHERE code = ?", (code,))
-    promo = cursor.fetchone()
-    if not promo:
-        conn.close()
-        return web.json_response({"error": "Такого промокода нет"}, status=400)
-    discount, limit_count, used_count = promo
-    if used_count >= limit_count:
-        conn.close()
-        return web.json_response({"error": "Лимит активаций исчерпан"}, status=400)
-    cursor.execute("SELECT * FROM user_promos WHERE user_id = ? AND code = ?", (user["id"], code))
-    if cursor.fetchone():
-        conn.close()
-        return web.json_response({"error": "Вы уже активировали этот код"}, status=400)
-    cursor.execute("UPDATE users SET discount = ? WHERE user_id = ?", (discount, user["id"]))
-    cursor.execute("INSERT INTO user_promos (user_id, code) VALUES (?, ?)", (user["id"], code))
-    cursor.execute("UPDATE promos SET used_count = used_count + 1 WHERE code = ?", (code,))
+    cursor.execute("INSERT INTO tickets (user_id, username, question) VALUES (?, ?, ?)", (user["id"], user.get("username", ""), question))
     conn.commit()
     conn.close()
-    return web.json_response({"status": "ok", "message": f"Промокод активирован! Скидка {discount}%"})
+    await send_admin_log(f"📩 <b>Новый тикет!</b>\n👤 @{user.get('username', '')}\n💬 {question}")
+    return web.json_response({"status": "ok", "message": "Тикет создан!"})
+
+async def api_reply_ticket(request):
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    user = validate_init_data(init_data)
+    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
+    data = await request.json()
+    ticket_id = data.get("ticket_id")
+    answer = data.get("answer", "").strip()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tickets SET answer = ? WHERE id = ?", (answer, ticket_id))
+    cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
+    target_user = cursor.fetchone()
+    conn.commit()
+    conn.close()
+    if target_user:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": target_user[0], "text": f"💬 <b>Ответ поддержки:</b>\n{answer}", "parse_mode": "HTML"}
+        async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
+    return web.json_response({"status": "ok", "message": "Ответ отправлен!"})
 
 @web.middleware
 async def cors_middleware(request, handler):
@@ -396,3 +364,4 @@ app.router.add_post('/api/promo', api_promo_activate)
 
 if __name__ == '__main__':
     web.run_app(app, host='0.0.0.0', port=PORT)
+    return web.json_response({"status": "ok", "message": f"Промокод активирован! Скидка {discount}%"})

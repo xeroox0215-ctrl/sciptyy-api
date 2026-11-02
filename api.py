@@ -37,6 +37,7 @@ def init_db():
     cursor.execute('CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, item_name TEXT, price REAL, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
     cursor.execute('CREATE TABLE IF NOT EXISTS stock (country TEXT PRIMARY KEY, amount INTEGER DEFAULT 0)')
     cursor.execute('CREATE TABLE IF NOT EXISTS promos (code TEXT PRIMARY KEY, discount INTEGER, limit_count INTEGER, used_count INTEGER DEFAULT 0)')
+    cursor.execute('CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, question TEXT, answer TEXT DEFAULT NULL)')
     conn.commit()
     conn.close()
 
@@ -79,13 +80,67 @@ async def api_profile(request):
     
     cursor.execute("SELECT country, amount FROM stock")
     stock_dict = {row[0]: row[1] for row in cursor.fetchall()}
+    shop_items = [{"code": code, "name": info["name"], "price": info["price"], "stock": stock_dict.get(code, 0)} for code, info in COUNTRIES.items()]
     
-    shop_items = []
-    for code, info in COUNTRIES.items():
-        shop_items.append({"code": code, "name": info["name"], "price": info["price"], "stock": stock_dict.get(code, 0)})
+    # Тикеты для пользователя или админа
+    tickets = []
+    if user["id"] in ADMIN_IDS:
+        cursor.execute("SELECT id, user_id, username, question, answer FROM tickets WHERE answer IS NULL ORDER BY id DESC")
+        tickets = [{"id": r[0], "user_id": r[1], "username": r[2], "question": r[3], "answer": r[4]} for r in cursor.fetchall()]
+    else:
+        cursor.execute("SELECT id, question, answer FROM tickets WHERE user_id = ? ORDER BY id DESC", (user["id"],))
+        tickets = [{"id": r[0], "question": r[1], "answer": r[2]} for r in cursor.fetchall()]
     
     conn.close()
-    return web.json_response({"status": "ok", "profile": profile, "purchases": purchases, "shop": shop_items, "is_admin": user["id"] in ADMIN_IDS})
+    return web.json_response({"status": "ok", "profile": profile, "purchases": purchases, "shop": shop_items, "is_admin": user["id"] in ADMIN_IDS, "tickets": tickets})
+
+async def api_create_ticket(request):
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    user = validate_init_data(init_data)
+    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
+    
+    data = await request.json()
+    question = data.get("question", "").strip()
+    if not question: return web.json_response({"error": "Пустой вопрос"}, status=400)
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO tickets (user_id, username, question) VALUES (?, ?, ?)", (user["id"], user.get("username", ""), question))
+    conn.commit()
+    conn.close()
+    
+    # Уведомление админу в бота
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": 1494459013, "text": f"📩 <b>Новый тикет на сайте!</b>\n👤 @{user.get('username', '')}\n💬 {question}", "parse_mode": "HTML"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, json=payload)
+        
+    return web.json_response({"status": "ok", "message": "Тикет создан!"})
+
+async def api_reply_ticket(request):
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    user = validate_init_data(init_data)
+    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
+    
+    data = await request.json()
+    ticket_id = data.get("ticket_id")
+    answer = data.get("answer", "").strip()
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE tickets SET answer = ? WHERE id = ?", (answer, ticket_id))
+    cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
+    target_user = cursor.fetchone()
+    conn.commit()
+    conn.close()
+    
+    if target_user:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": target_user[0], "text": f"💬 <b>Ответ поддержки:</b>\n{answer}", "parse_mode": "HTML"}
+        async with aiohttp.ClientSession() as session:
+            await session.post(url, json=payload)
+            
+    return web.json_response({"status": "ok", "message": "Ответ отправлен!"})
 
 async def api_roll(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
@@ -140,6 +195,7 @@ async def api_buy(request):
     conn.commit()
     conn.close()
     return web.json_response({"status": "ok", "message": "Успешно куплено!", "item": info['name']})
+
 async def api_topup(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
@@ -158,15 +214,84 @@ async def api_topup(request):
                 return web.json_response({"url": res_data.get("url") or res_data.get("paymentUrl")})
             return web.json_response({"error": "Ошибка Lava API"}, status=500)
 
-# --- АДМИНСКИЕ РУЧКИ ---
+# --- КЕЙСЫ ---
+async def api_case_buy(request):
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    user = validate_init_data(init_data)
+    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
+    
+    data = await request.json()
+    case_type = data.get("type") # "normal" или "vip"
+    price = 99 if case_type == "normal" else 249
+    
+    profile = get_user(user["id"])
+    if profile["balance"] < price:
+        return web.json_response({"error": "Недостаточно средств"}, status=400)
+        
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user["id"]))
+    if case_type == "normal":
+        cursor.execute("UPDATE users SET cases = cases + 1 WHERE user_id = ?", (user["id"],))
+    else:
+        cursor.execute("UPDATE users SET vip_cases = vip_cases + 1 WHERE user_id = ?", (user["id"],))
+    conn.commit()
+    conn.close()
+    return web.json_response({"status": "ok", "message": "Кейс куплен! Теперь его можно открыть."})
+
+async def api_case_open(request):
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    user = validate_init_data(init_data)
+    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
+    
+    data = await request.json()
+    case_type = data.get("type")
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    profile = get_user(user["id"])
+    
+    if case_type == "normal" and profile["cases"] <= 0: return web.json_response({"error": "Нет обычных кейсов"}, status=400)
+    if case_type == "vip" and profile["vip_cases"] <= 0: return web.json_response({"error": "Нет VIP кейсов"}, status=400)
+    
+    if case_type == "normal": cursor.execute("UPDATE users SET cases = cases - 1 WHERE user_id = ?", (user["id"],))
+    else: cursor.execute("UPDATE users SET vip_cases = vip_cases - 1 WHERE user_id = ?", (user["id"],))
+    
+    roll = random.randint(1, 100)
+    prize = {}
+    
+    if roll <= 40: # Деньги
+        amount = random.randint(5, 10) if case_type == "normal" else random.randint(30, 50)
+        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user["id"]))
+        prize = {"type": "money", "value": f"{amount} ₽"}
+    elif roll <= 70: # Промокод
+        disc = random.randint(5, 15) if case_type == "normal" else random.randint(15, 50)
+        code = f"BOX-{disc}-{random.randint(1000, 9999)}"
+        cursor.execute("INSERT INTO promos (code, discount, limit_count) VALUES (?, ?, ?)", (code, disc, 1))
+        prize = {"type": "promo", "value": f"Промокод на {disc}%", "code": code}
+    else: # Аккаунт
+        country = random.choice(list(COUNTRIES.keys()))
+        cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс ({case_type}) - {COUNTRIES[country]['name']}", 0))
+        prize = {"type": "account", "value": COUNTRIES[country]['name']}
+        
+    conn.commit()
+    conn.close()
+    
+    # Уведомление админу
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    text = f"📦 <b>Открытие кейса (Сайт)</b>\n👤 @{user.get('username', '')}\n🎁 Выигрыш: {prize['value']}"
+    payload = {"chat_id": 1494459013, "text": text, "parse_mode": "HTML"}
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, json=payload)
+        
+    return web.json_response({"status": "ok", "prize": prize})
+
 async def api_admin_money(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
-    
     data = await request.json()
     amount = float(data.get("amount", 0))
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user["id"]))
@@ -178,11 +303,9 @@ async def api_admin_stock(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
-    
     data = await request.json()
     country = data.get("country")
     amount = int(data.get("amount", 0))
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO stock (country, amount) VALUES (?, ?)", (country, amount))
@@ -194,14 +317,11 @@ async def api_admin_promo(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
-    
     data = await request.json()
     code = data.get("code", "").strip().upper()
     discount = int(data.get("discount", 5))
     limit = int(data.get("limit", 1))
-    
     if not code: return web.json_response({"error": "Пустой код"}, status=400)
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     try:
@@ -227,6 +347,10 @@ app.router.add_get('/api/profile', api_profile)
 app.router.add_post('/api/roll', api_roll)
 app.router.add_post('/api/buy', api_buy)
 app.router.add_post('/api/topup', api_topup)
+app.router.add_post('/api/case/buy', api_case_buy)
+app.router.add_post('/api/case/open', api_case_open)
+app.router.add_post('/api/ticket/create', api_create_ticket)
+app.router.add_post('/api/ticket/reply', api_reply_ticket)
 app.router.add_post('/api/admin/money', api_admin_money)
 app.router.add_post('/api/admin/stock', api_admin_stock)
 app.router.add_post('/api/admin/promo', api_admin_promo)

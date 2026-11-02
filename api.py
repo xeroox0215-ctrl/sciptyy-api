@@ -128,7 +128,9 @@ async def api_buy(request):
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
     data = await request.json()
     country = data.get("country")
+    
     if country not in COUNTRIES: return web.json_response({"error": "Товар не найден"}, status=404)
+    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT amount FROM stock WHERE country = ?", (country,))
@@ -136,20 +138,28 @@ async def api_buy(request):
     if not stock or stock[0] <= 0:
         conn.close()
         return web.json_response({"error": "Нет в наличии"}, status=400)
+        
     info = COUNTRIES[country]
     profile = get_user(user["id"])
     final_price = int(info['price'] * (1 - profile['discount'] / 100))
     if final_price < 1: final_price = 1
+    
     if profile['balance'] < final_price:
         conn.close()
         return web.json_response({"error": "Недостаточно средств"}, status=400)
+        
+    import uuid
+    tx_id = str(uuid.uuid4())[:8].upper() # Генерируем номер транзакции
+    
     cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user["id"]))
     cursor.execute("UPDATE stock SET amount = amount - 1 WHERE country = ?", (country,))
-    cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], info['name'], final_price))
+    cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"{info['name']} (TX: {tx_id})", final_price))
     conn.commit()
     conn.close()
-    await send_admin_log(f"🛒 <b>Покупка (Сайт)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n<i>Выдайте товар вручную!</i>")
-    return web.json_response({"status": "ok", "message": "Успешно куплено! Товар будет выдан вручную.", "item": info['name']})
+    
+    await send_admin_log(f"🛒 <b>Покупка (Сайт, Баланс)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n🔢 TX: {tx_id}\n<i>Выдайте товар вручную!</i>")
+    
+    return web.json_response({"status": "ok", "message": "Деньги списаны! Ожидайте выдачи.", "item": info['name'], "tx_id": tx_id})
 
 async def api_buy_stars_invoice(request):
     init_data = request.headers.get("X-Telegram-Init-Data")

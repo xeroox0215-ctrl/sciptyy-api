@@ -77,7 +77,8 @@ async def send_admin_log(text):
     payload = {"chat_id": 1494459013, "text": text, "parse_mode": "HTML"}
     try:
         async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
-    except: passasync def api_profile(request):
+    except: pass
+async def api_profile(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
@@ -145,7 +146,7 @@ async def api_buy(request):
     conn.commit()
     conn.close()
     await send_admin_log(f"🛒 <b>Покупка (Сайт)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n<i>Выдайте товар вручную!</i>")
-    return web.json_response({"status": "ok", "message": "Успешно куплено!", "item": info['name']})
+    return web.json_response({"status": "ok", "message": "Успешно куплено! Товар будет выдан вручную.", "item": info['name']})
 
 async def api_buy_stars_invoice(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
@@ -256,7 +257,9 @@ async def api_promo_activate(request):
     cursor.execute("INSERT INTO user_promos (user_id, code) VALUES (?, ?)", (user["id"], code))
     cursor.execute("UPDATE promos SET used_count = used_count + 1 WHERE code = ?", (code,))
     conn.commit()
-    conn.close()async def api_admin_money(request):
+    conn.close()
+    return web.json_response({"status": "ok", "message": f"Промокод активирован! Скидка {discount}%"})
+    async def api_admin_money(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
@@ -364,4 +367,3 @@ app.router.add_post('/api/promo', api_promo_activate)
 
 if __name__ == '__main__':
     web.run_app(app, host='0.0.0.0', port=PORT)
-    return web.json_response({"status": "ok", "message": f"Промокод активирован! Скидка {discount}%"})

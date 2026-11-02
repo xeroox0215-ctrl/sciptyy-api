@@ -71,13 +71,13 @@ def get_user(user_id):
     conn.close()
     if row: return {"discount": row[0], "balance": float(row[1]), "last_roll": row[2], "cases": row[3], "vip_cases": row[4]}
     return {"discount": 0, "balance": 0.0, "last_roll": 0, "cases": 0, "vip_cases": 0}
-
-async def send_admin_log(text):
+    async def send_admin_log(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": 1494459013, "text": text, "parse_mode": "HTML"}
     try:
         async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
     except: pass
+
 async def api_profile(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
@@ -145,7 +145,7 @@ async def api_buy(request):
     cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], info['name'], final_price))
     conn.commit()
     conn.close()
-    await send_admin_log(f"🛒 <b>Покупка (Сайт)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n<i>Выдайте товар вручную!</i>")
+    await send_admin_log(f"🛒 <b>Покупка (Сайт, Баланс)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n<i>Выдайте товар вручную!</i>")
     return web.json_response({"status": "ok", "message": "Успешно куплено! Товар будет выдан вручную.", "item": info['name']})
 
 async def api_buy_stars_invoice(request):
@@ -259,7 +259,8 @@ async def api_promo_activate(request):
     conn.commit()
     conn.close()
     return web.json_response({"status": "ok", "message": f"Промокод активирован! Скидка {discount}%"})
-    async def api_admin_money(request):
+
+async def api_admin_money(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)

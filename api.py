@@ -43,6 +43,7 @@ def init_db():
     conn.commit(); conn.close()
 
 init_db()
+
 def validate_init_data(init_data: str) -> dict:
     try:
         parsed_data = dict(parse_qsl(init_data))
@@ -80,8 +81,8 @@ async def api_profile(request):
     if profile["balance"] >= 500 and profile["gift_claimed"] == 0:
         cursor.execute("UPDATE users SET cases = cases + 1, gift_claimed = 1 WHERE user_id = ?", (user["id"],)); conn.commit()
         profile["cases"] += 1; profile["gift_claimed"] = 1
-    cursor.execute("SELECT item_name, price, date FROM purchases WHERE user_id = ? ORDER BY id DESC LIMIT 10", (user["id"],))
-    purchases = [{"name": r[0], "price": r[1], "date": r[2]} for r in cursor.fetchall()]
+    cursor.execute("SELECT id, item_name, price, date FROM purchases WHERE user_id = ? ORDER BY id DESC LIMIT 10", (user["id"],))
+    purchases = [{"id": r[0], "name": r[1], "price": r[2], "date": r[3]} for r in cursor.fetchall()]
     cursor.execute("SELECT item_name FROM purchases WHERE user_id = ? AND item_name NOT LIKE '%Кейс%' AND item_name NOT LIKE '%Промокод%'", (user["id"],))
     my_accounts = [r[0] for r in cursor.fetchall()]
     cursor.execute("SELECT country, amount FROM stock")
@@ -116,31 +117,28 @@ async def api_roll(request):
     cursor.execute("UPDATE users SET balance = balance + ?, last_roll = ? WHERE user_id = ?", (amount, now, user["id"]))
     conn.commit(); conn.close()
     return web.json_response({"status": "ok", "prize": f"{amount} ₽", "amount": amount})
+
 async def api_buy(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
+    init_data = request.headers.get("X-Telegram-Init-Data"); user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    data = await request.json()
-    country = data.get("country")
+    data = await request.json(); country = data.get("country")
     if country not in COUNTRIES: return web.json_response({"error": "Товар не найден"}, status=404)
     conn = sqlite3.connect(DB_FILE); cursor = conn.cursor()
     cursor.execute("SELECT amount FROM stock WHERE country = ?", (country,))
     stock = cursor.fetchone()
-    if not stock or stock[0] <= 0:
-        conn.close(); return web.json_response({"error": "Нет в наличии"}, status=400)
+    if not stock or stock[0] <= 0: conn.close(); return web.json_response({"error": "Нет в наличии"}, status=400)
     info = COUNTRIES[country]; profile = get_user(user["id"])
     final_price = int(info["price"] * (1 - profile["discount"] / 100))
     if final_price < 1: final_price = 1
-    if profile["balance"] < final_price:
-        conn.close(); return web.json_response({"error": "Недостаточно средств"}, status=400)
+    if profile["balance"] < final_price: conn.close(); return web.json_response({"error": "Недостаточно средств"}, status=400)
     cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user["id"]))
     cursor.execute("UPDATE stock SET amount = amount - 1 WHERE country = ?", (country,))
     cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], info["name"], final_price))
+    purchase_id = cursor.lastrowid
     cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (f"🛒 @{user.get('username', 'user')} купил аккаунт {info['name']}", time.time() + 3600))
     conn.commit(); conn.close()
-    await send_admin_log(f"🛒 <b>Покупка</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽")
-    return web.json_response({"status": "ok", "message": "Деньги списаны! Ожидайте выдачи."})
-
+    await send_admin_log(f"🛒 <b>Покупка #{purchase_id}</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n<i>Выдайте товар!</i>")
+    return web.json_response({"status": "ok", "message": f"Деньги списаны! Транзакция #{purchase_id}. Ожидайте выдачи."})
 async def api_case_buy(request):
     init_data = request.headers.get("X-Telegram-Init-Data"); user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
@@ -178,8 +176,14 @@ async def api_case_open(request):
     else:
         country = random.choice(list(COUNTRIES.keys())); prize = {"type": "account", "value": COUNTRIES[country]["name"]}
         cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: Аккаунт {prize['value']}", 0))
+        
     cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (f"🎁 @{user.get('username', 'user')} выиграл {prize['value']}", time.time() + 3600))
     conn.commit(); conn.close()
+    
+    # Отправляем уведомление админу, если выпал аккаунт
+    if prize["type"] == "account":
+        await send_admin_log(f"🔥 <b>Выигрыш аккаунта из кейса!</b>\n👤 @{user.get('username', '')}\n🌍 {prize['value']}\n<i>Выдайте аккаунт пользователю!</i>")
+        
     return web.json_response({"status": "ok", "prize": prize})
 
 async def api_promo_activate(request):
@@ -209,7 +213,10 @@ async def api_upgrade(request):
     cursor.execute("DELETE FROM purchases WHERE user_id = ? AND item_name = ? LIMIT 2", (user["id"], acc1))
     new_country = random.choice(list(COUNTRIES.keys())); new_name = COUNTRIES[new_country]["name"]
     cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], new_name, 0))
+    purchase_id = cursor.lastrowid
     conn.commit(); conn.close()
+    
+    await send_admin_log(f"📈 <b>Апгрейд!</b>\n👤 @{user.get('username', '')}\n🗑 Сгорели: {acc1}\n🎁 Получил: {new_name}\n<i>Выдайте новый аккаунт!</i>")
     return web.json_response({"status": "ok", "message": f"Успех! Вы получили {new_name}", "new_acc": new_name})
 async def api_chat(request):
     conn = sqlite3.connect(DB_FILE)
@@ -381,4 +388,4 @@ app.router.add_post('/api/ticket/create', api_create_ticket)
 app.router.add_post('/api/ticket/reply', api_reply_ticket)
 
 if __name__ == '__main__':
-    web.run_app(app, host='0.0.0.0', port=PORT)
+    web.run_app(app, host='0.0.0.0', port=PORT)    

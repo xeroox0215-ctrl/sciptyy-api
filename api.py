@@ -39,6 +39,8 @@ def init_db():
     cursor.execute('CREATE TABLE IF NOT EXISTS promos (code TEXT PRIMARY KEY, discount INTEGER, limit_count INTEGER, used_count INTEGER DEFAULT 0)')
     cursor.execute('CREATE TABLE IF NOT EXISTS user_promos (user_id INTEGER, code TEXT, PRIMARY KEY (user_id, code))')
     cursor.execute('CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, question TEXT, answer TEXT DEFAULT NULL)')
+    # Таблица событий с временем жизни
+    cursor.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, expire_time REAL)')
     conn.commit()
     conn.close()
 
@@ -71,8 +73,7 @@ async def send_admin_log(text):
     try:
         async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
     except: pass
-
-async def api_profile(request):
+      async def api_profile(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
@@ -83,7 +84,6 @@ async def api_profile(request):
     
     profile = get_user(user["id"])
     
-    # Проверка на подарок за пополнение от 500
     if profile["balance"] >= 500 and profile["gift_claimed"] == 0:
         cursor.execute("UPDATE users SET cases = cases + 1, gift_claimed = 1 WHERE user_id = ?", (user["id"],))
         conn.commit()
@@ -104,6 +104,19 @@ async def api_profile(request):
         tickets = [{"id": r[0], "question": r[1], "answer": r[2]} for r in cursor.fetchall()]
     conn.close()
     return web.json_response({"status": "ok", "profile": profile, "purchases": purchases, "shop": shop_items, "is_admin": user["id"] in ADMIN_IDS, "tickets": tickets})
+
+async def api_events(request):
+    now = time.time()
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    # Очищаем старые события
+    cursor.execute("DELETE FROM events WHERE expire_time < ?", (now,))
+    conn.commit()
+    # Берем последние 5
+    cursor.execute("SELECT text FROM events ORDER BY id DESC LIMIT 5")
+    events = [r[0] for r in cursor.fetchall()]
+    conn.close()
+    return web.json_response({"status": "ok", "events": events})
 
 async def api_roll(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
@@ -143,15 +156,19 @@ async def api_buy(request):
     if profile['balance'] < final_price:
         conn.close()
         return web.json_response({"error": "Недостаточно средств"}, status=400)
-    import uuid
-    tx_id = str(uuid.uuid4())[:8].upper()
+    
     cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user["id"]))
     cursor.execute("UPDATE stock SET amount = amount - 1 WHERE country = ?", (country,))
-    cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"{info['name']} (TX: {tx_id})", final_price))
+    cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], info['name'], final_price))
+    
+    # Добавляем событие с временем жизни (60 минут)
+    event_text = f"Игрок @{user.get('username', 'user')} купил аккаунт {info['name']}"
+    cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (event_text, time.time() + 3600))
+    
     conn.commit()
     conn.close()
-    await send_admin_log(f"🛒 <b>Покупка (Сайт, Баланс)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n🔢 TX: {tx_id}\n<i>Выдайте товар вручную!</i>")
-    return web.json_response({"status": "ok", "message": "Деньги списаны! Ожидайте выдачи.", "item": info['name'], "tx_id": tx_id})
+    await send_admin_log(f"🛒 <b>Покупка (Сайт)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n<i>Выдайте товар вручную!</i>")
+    return web.json_response({"status": "ok", "message": "Деньги списаны! Ожидайте выдачи.", "item": info['name']})
 
 async def api_buy_stars_invoice(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
@@ -217,23 +234,31 @@ async def api_case_open(request):
     if case_type == "vip" and profile["vip_cases"] <= 0: return web.json_response({"error": "Нет кейсов"}, status=400)
     if case_type == "normal": cursor.execute("UPDATE users SET cases = cases - 1 WHERE user_id = ?", (user["id"],))
     else: cursor.execute("UPDATE users SET vip_cases = vip_cases - 1 WHERE user_id = ?", (user["id"],))
+    
     roll = random.randint(1, 100)
     prize = {}
     if roll <= 40:
         amount = random.randint(5, 10) if case_type == "normal" else random.randint(30, 50)
         cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user["id"]))
         prize = {"type": "money", "value": f"{amount} ₽"}
+        event_text = f"Игрок @{user.get('username', 'user')} открыл {case_type.upper()}-кейс и выиграл {amount}₽"
         cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: {prize['value']}", 0))
     elif roll <= 70:
         disc = random.randint(5, 15) if case_type == "normal" else random.randint(15, 50)
         code = f"BOX-{disc}-{random.randint(1000, 9999)}"
         cursor.execute("INSERT INTO promos (code, discount, limit_count) VALUES (?, ?, ?)", (code, disc, 1))
         prize = {"type": "promo", "value": f"Промокод на {disc}%", "code": code}
+        event_text = f"Игрок @{user.get('username', 'user')} открыл {case_type.upper()}-кейс и выиграл промокод {code}"
         cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: Промокод {code}", 0))
     else:
         country = random.choice(list(COUNTRIES.keys()))
         prize = {"type": "account", "value": COUNTRIES[country]['name']}
+        event_text = f"Игрок @{user.get('username', 'user')} открыл {case_type.upper()}-кейс и выиграл аккаунт {prize['value']}"
         cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: Аккаунт {prize['value']}", 0))
+    
+    # Добавляем событие с временем жизни (60 минут)
+    cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (event_text, time.time() + 3600))
+    
     conn.commit()
     conn.close()
     await send_admin_log(f"📦 <b>Кейс (Сайт)</b>\n👤 @{user.get('username', '')}\n🎁 {prize['value']}")
@@ -349,6 +374,27 @@ async def api_reply_ticket(request):
         async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
     return web.json_response({"status": "ok", "message": "Ответ отправлен!"})
 
+async def api_admin_broadcast(request):
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    user = validate_init_data(init_data)
+    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
+    
+    data = await request.json()
+    text = data.get("text", "").strip()
+    minutes = int(data.get("minutes", 60))
+    
+    if not text: return web.json_response({"error": "Пустой текст"}, status=400)
+    
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    expire_time = time.time() + (minutes * 60)
+    cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (text, expire_time))
+    conn.commit()
+    conn.close()
+    
+    await send_admin_log(f"📢 <b>Рассылка (Сайт):</b>\n{text}\n<i>Будет видно {minutes} мин.</i>")
+    return web.json_response({"status": "ok", "message": "Текст доставлен и добавлен в события!"})
+
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS": response = web.Response()
@@ -360,6 +406,7 @@ async def cors_middleware(request, handler):
 
 app = web.Application(middlewares=[cors_middleware])
 app.router.add_get('/api/profile', api_profile)
+app.router.add_get('/api/events', api_events)
 app.router.add_post('/api/roll', api_roll)
 app.router.add_post('/api/buy', api_buy)
 app.router.add_post('/api/buy_stars', api_buy_stars_invoice)
@@ -371,7 +418,8 @@ app.router.add_post('/api/ticket/reply', api_reply_ticket)
 app.router.add_post('/api/admin/money', api_admin_money)
 app.router.add_post('/api/admin/stock', api_admin_stock)
 app.router.add_post('/api/admin/promo', api_admin_promo)
+app.router.add_post('/api/admin/broadcast', api_admin_broadcast)
 app.router.add_post('/api/promo', api_promo_activate)
 
 if __name__ == '__main__':
-    web.run_app(app, host='0.0.0.0', port=PORT)
+    web.run_app(app, host='0.0.0.0', port=PORT)  

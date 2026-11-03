@@ -177,17 +177,14 @@ async def api_buy(request):
     cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user["id"]))
     cursor.execute("UPDATE stock SET amount = amount - 1 WHERE country = ?", (country,))
     cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], info["name"], final_price))
-    
     event_text = f"🛒 @{user.get('username', 'user')} купил аккаунт {info['name']}"
     cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (event_text, time.time() + 3600))
-    
     conn.commit()
     conn.close()
     
     await send_admin_log(f"🛒 <b>Покупка (Сайт)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽")
     return web.json_response({"status": "ok", "message": "Деньги списаны! Ожидайте выдачи.", "item": info["name"]})
-
-async def api_buy_stars_invoice(request):
+    async def api_buy_stars_invoice(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
@@ -199,7 +196,6 @@ async def api_buy_stars_invoice(request):
     
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
     payload = {"title": f"Аккаунт {info['name']}", "description": "Оплата. Выдача вручную.", "payload": f"acc_stars_{country}", "currency": "XTR", "prices": [{"label": "Аккаунт", "amount": stars}]}
-    
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as resp:
             res = await resp.json()
@@ -223,7 +219,8 @@ async def api_topup(request):
                 res_data = await resp.json()
                 return web.json_response({"url": res_data.get("url") or res_data.get("paymentUrl")})
             return web.json_response({"error": "Ошибка Lava API"}, status=500)
-    async def api_case_buy(request):
+
+async def api_case_buy(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
@@ -242,8 +239,7 @@ async def api_topup(request):
     conn.commit()
     conn.close()
     return web.json_response({"status": "ok", "message": "Кейс куплен!"})
-
-async def api_case_open(request):
+    async def api_case_open(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
@@ -324,8 +320,7 @@ async def api_promo_activate(request):
     conn.commit()
     conn.close()
     return web.json_response({"status": "ok", "message": f"Промокод активирован! Скидка {discount}%"})
-
-async def api_create_ticket(request):
+    async def api_create_ticket(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
@@ -345,9 +340,7 @@ async def api_create_ticket(request):
 async def api_reply_ticket(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: 
-        return web.json_response({"error": "Доступ запрещен"}, status=403)
-        
+    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
     data = await request.json()
     ticket_id = data.get("ticket_id")
     answer = data.get("answer", "").strip()
@@ -364,19 +357,15 @@ async def api_reply_ticket(request):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {"chat_id": target_user[0], "text": f"💬 <b>Ответ поддержки:</b>\n\n{answer}", "parse_mode": "HTML"}
         async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
-        
     return web.json_response({"status": "ok", "message": "Ответ отправлен!"})
 
 async def api_admin_broadcast(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: 
-        return web.json_response({"error": "Доступ запрещен"}, status=403)
-        
+    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
     data = await request.json()
     text = data.get("text", "").strip()
     minutes = int(data.get("minutes", 60))
-    
     if not text: return web.json_response({"error": "Пустой текст"}, status=400)
     
     try:
@@ -386,7 +375,6 @@ async def api_admin_broadcast(request):
         cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (text, expire_time))
         conn.commit()
         conn.close()
-        
         asyncio.create_task(send_admin_log(f"📢 <b>Рассылка (Сайт):</b>\n{text}\n<i>Будет видно {minutes} мин.</i>"))
         return web.json_response({"status": "ok", "message": "Текст доставлен и добавлен в события!"})
     except Exception as e:
@@ -395,11 +383,9 @@ async def api_admin_broadcast(request):
 async def api_admin_money(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: 
-        return web.json_response({"error": "Доступ запрещен"}, status=403)
+    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
     data = await request.json()
     amount = float(data.get("amount", 0))
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user["id"]))
@@ -410,12 +396,10 @@ async def api_admin_money(request):
 async def api_admin_stock(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: 
-        return web.json_response({"error": "Доступ запрещен"}, status=403)
+    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
     data = await request.json()
     country = data.get("country")
     amount = int(data.get("amount", 0))
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO stock (country, amount) VALUES (?, ?)", (country, amount))
@@ -426,13 +410,11 @@ async def api_admin_stock(request):
 async def api_admin_promo(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: 
-        return web.json_response({"error": "Доступ запрещен"}, status=403)
+    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
     data = await request.json()
     code = data.get("code", "").strip().upper()
     discount = int(data.get("discount", 5))
     limit = int(data.get("limit", 1))
-    
     if not code: return web.json_response({"error": "Пустой код"}, status=400)
     
     conn = sqlite3.connect(DB_FILE)
@@ -445,6 +427,10 @@ async def api_admin_promo(request):
         res = {"error": "Такой промокод уже есть"}
     conn.close()
     return web.json_response(res)
+
+async def api_ping(request):
+    return web.json_response({"status": "ok"})
+
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS": 
@@ -455,9 +441,6 @@ async def cors_middleware(request, handler):
     response.headers['Access-Control-Allow-Headers'] = 'X-Telegram-Init-Data, Content-Type'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     return response
-
-async def api_ping(request):
-    return web.json_response({"status": "ok"})
 
 app = web.Application(middlewares=[cors_middleware])
 app.router.add_get('/ping', api_ping)
@@ -476,5 +459,6 @@ app.router.add_post('/api/admin/stock', api_admin_stock)
 app.router.add_post('/api/admin/promo', api_admin_promo)
 app.router.add_post('/api/admin/broadcast', api_admin_broadcast)
 app.router.add_post('/api/promo', api_promo_activate)
+
 if __name__ == '__main__':
     web.run_app(app, host='0.0.0.0', port=PORT)

@@ -82,7 +82,8 @@ async def send_admin_log(text):
             await session.post(url, json=payload)
     except: 
         pass
-        async def api_profile(request):
+        
+async def api_profile(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)

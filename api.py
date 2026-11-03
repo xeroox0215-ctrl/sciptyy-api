@@ -39,7 +39,6 @@ def init_db():
     cursor.execute('CREATE TABLE IF NOT EXISTS promos (code TEXT PRIMARY KEY, discount INTEGER, limit_count INTEGER, used_count INTEGER DEFAULT 0)')
     cursor.execute('CREATE TABLE IF NOT EXISTS user_promos (user_id INTEGER, code TEXT, PRIMARY KEY (user_id, code))')
     cursor.execute('CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, question TEXT, answer TEXT DEFAULT NULL)')
-    # Таблица событий с временем жизни
     cursor.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, expire_time REAL)')
     conn.commit()
     conn.close()
@@ -73,7 +72,7 @@ async def send_admin_log(text):
     try:
         async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
     except: pass
-      async def api_profile(request):
+     async def api_profile(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
@@ -109,10 +108,8 @@ async def api_events(request):
     now = time.time()
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    # Очищаем старые события
     cursor.execute("DELETE FROM events WHERE expire_time < ?", (now,))
     conn.commit()
-    # Берем последние 5
     cursor.execute("SELECT text FROM events ORDER BY id DESC LIMIT 5")
     events = [r[0] for r in cursor.fetchall()]
     conn.close()
@@ -161,7 +158,6 @@ async def api_buy(request):
     cursor.execute("UPDATE stock SET amount = amount - 1 WHERE country = ?", (country,))
     cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], info['name'], final_price))
     
-    # Добавляем событие с временем жизни (60 минут)
     event_text = f"Игрок @{user.get('username', 'user')} купил аккаунт {info['name']}"
     cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (event_text, time.time() + 3600))
     
@@ -256,7 +252,6 @@ async def api_case_open(request):
         event_text = f"Игрок @{user.get('username', 'user')} открыл {case_type.upper()}-кейс и выиграл аккаунт {prize['value']}"
         cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: Аккаунт {prize['value']}", 0))
     
-    # Добавляем событие с временем жизни (60 минут)
     cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (event_text, time.time() + 3600))
     
     conn.commit()
@@ -385,15 +380,19 @@ async def api_admin_broadcast(request):
     
     if not text: return web.json_response({"error": "Пустой текст"}, status=400)
     
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    expire_time = time.time() + (minutes * 60)
-    cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (text, expire_time))
-    conn.commit()
-    conn.close()
-    
-    await send_admin_log(f"📢 <b>Рассылка (Сайт):</b>\n{text}\n<i>Будет видно {minutes} мин.</i>")
-    return web.json_response({"status": "ok", "message": "Текст доставлен и добавлен в события!"})
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        expire_time = time.time() + (minutes * 60)
+        cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (text, expire_time))
+        conn.commit()
+        conn.close()
+        
+        asyncio.create_task(send_admin_log(f"📢 <b>Рассылка (Сайт):</b>\n{text}\n<i>Будет видно {minutes} мин.</i>"))
+        
+        return web.json_response({"status": "ok", "message": "Текст доставлен и добавлен в события!"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
 
 @web.middleware
 async def cors_middleware(request, handler):
@@ -422,4 +421,4 @@ app.router.add_post('/api/admin/broadcast', api_admin_broadcast)
 app.router.add_post('/api/promo', api_promo_activate)
 
 if __name__ == '__main__':
-    web.run_app(app, host='0.0.0.0', port=PORT)  
+    web.run_app(app, host='0.0.0.0', port=PORT)   

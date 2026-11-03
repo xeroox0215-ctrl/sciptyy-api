@@ -20,20 +20,13 @@ LAVA_TOPUP_OFFER_ID = "d937583a-6dc5-46e0-982d-8590351fa7bc"
 LAVA_EMAIL = "test@mail.ru"
 
 COUNTRIES = {
-    "usa": {"name": "🇺🇸 США", "price": 46, "stars": 46},
-    "canada": {"name": "🇨🇦 Канада", "price": 99, "stars": 100},
-    "colombia": {"name": "🇨🇴 Колумбия", "price": 99, "stars": 100},
-    "uk": {"name": "🇬🇧 Великобритания", "price": 125, "stars": 125},
-    "bangladesh": {"name": "🇧🇩 Бангладеш", "price": 99, "stars": 100},
-    "argentina": {"name": "🇦🇷 Аргентина", "price": 125, "stars": 125},
-    "uzbekistan": {"name": "🇺🇿 Узбекистан", "price": 175, "stars": 150},
-    "brazil": {"name": "🇧🇷 Бразилия", "price": 175, "stars": 175},
-    "thailand": {"name": "🇹🇭 Таиланд", "price": 199, "stars": 199},
-    "france": {"name": "🇫🇷 Франция", "price": 199, "stars": 199},
-    "germany": {"name": "🇩🇪 Германия", "price": 249, "stars": 249},
-    "kazakhstan": {"name": "🇰🇿 Казахстан", "price": 249, "stars": 249},
-    "ukraine": {"name": "🇺🇦 Украина", "price": 249, "stars": 249},
-    "poland": {"name": "🇵🇱 Польша", "price": 249, "stars": 249},
+    "usa": {"name": "🇺🇸 США", "price": 46, "stars": 46}, "canada": {"name": "🇨🇦 Канада", "price": 99, "stars": 100},
+    "colombia": {"name": "🇨🇴 Колумбия", "price": 99, "stars": 100}, "uk": {"name": "🇬🇧 Великобритания", "price": 125, "stars": 125},
+    "bangladesh": {"name": "🇧🇩 Бангладеш", "price": 99, "stars": 100}, "argentina": {"name": "🇦🇷 Аргентина", "price": 125, "stars": 125},
+    "uzbekistan": {"name": "🇺🇿 Узбекистан", "price": 175, "stars": 150}, "brazil": {"name": "🇧🇷 Бразилия", "price": 175, "stars": 175},
+    "thailand": {"name": "🇹🇭 Таиланд", "price": 199, "stars": 199}, "france": {"name": "🇫🇷 Франция", "price": 199, "stars": 199},
+    "germany": {"name": "🇩🇪 Германия", "price": 249, "stars": 249}, "kazakhstan": {"name": "🇰🇿 Казахстан", "price": 249, "stars": 249},
+    "ukraine": {"name": "🇺🇦 Украина", "price": 249, "stars": 249}, "poland": {"name": "🇵🇱 Польша", "price": 249, "stars": 249},
     "mauritania": {"name": "🇲🇷 Мавритания", "price": 299, "stars": 300}
 }
 
@@ -76,10 +69,8 @@ async def send_admin_log(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": 1494459013, "text": text, "parse_mode": "HTML"}
     try:
-        async with aiohttp.ClientSession() as session: 
-            await session.post(url, json=payload)
-    except: 
-        pass
+        async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
+    except: pass
 
 async def api_profile(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
@@ -128,9 +119,7 @@ async def api_buy(request):
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
     data = await request.json()
     country = data.get("country")
-    
     if country not in COUNTRIES: return web.json_response({"error": "Товар не найден"}, status=404)
-    
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("SELECT amount FROM stock WHERE country = ?", (country,))
@@ -138,27 +127,21 @@ async def api_buy(request):
     if not stock or stock[0] <= 0:
         conn.close()
         return web.json_response({"error": "Нет в наличии"}, status=400)
-        
     info = COUNTRIES[country]
     profile = get_user(user["id"])
     final_price = int(info['price'] * (1 - profile['discount'] / 100))
     if final_price < 1: final_price = 1
-    
     if profile['balance'] < final_price:
         conn.close()
         return web.json_response({"error": "Недостаточно средств"}, status=400)
-        
     import uuid
-    tx_id = str(uuid.uuid4())[:8].upper() # Генерируем номер транзакции
-    
+    tx_id = str(uuid.uuid4())[:8].upper()
     cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user["id"]))
     cursor.execute("UPDATE stock SET amount = amount - 1 WHERE country = ?", (country,))
     cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"{info['name']} (TX: {tx_id})", final_price))
     conn.commit()
     conn.close()
-    
     await send_admin_log(f"🛒 <b>Покупка (Сайт, Баланс)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽\n🔢 TX: {tx_id}\n<i>Выдайте товар вручную!</i>")
-    
     return web.json_response({"status": "ok", "message": "Деньги списаны! Ожидайте выдачи.", "item": info['name'], "tx_id": tx_id})
 
 async def api_buy_stars_invoice(request):
@@ -231,15 +214,17 @@ async def api_case_open(request):
         amount = random.randint(5, 10) if case_type == "normal" else random.randint(30, 50)
         cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user["id"]))
         prize = {"type": "money", "value": f"{amount} ₽"}
+        cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: {prize['value']}", 0))
     elif roll <= 70:
         disc = random.randint(5, 15) if case_type == "normal" else random.randint(15, 50)
         code = f"BOX-{disc}-{random.randint(1000, 9999)}"
         cursor.execute("INSERT INTO promos (code, discount, limit_count) VALUES (?, ?, ?)", (code, disc, 1))
         prize = {"type": "promo", "value": f"Промокод на {disc}%", "code": code}
+        cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: Промокод {code}", 0))
     else:
         country = random.choice(list(COUNTRIES.keys()))
-        cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс ({case_type}) - {COUNTRIES[country]['name']}", 0))
         prize = {"type": "account", "value": COUNTRIES[country]['name']}
+        cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: Аккаунт {prize['value']}", 0))
     conn.commit()
     conn.close()
     await send_admin_log(f"📦 <b>Кейс (Сайт)</b>\n👤 @{user.get('username', '')}\n🎁 {prize['value']}")

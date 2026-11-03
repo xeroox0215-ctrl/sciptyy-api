@@ -47,6 +47,7 @@ def init_db():
     cursor.execute("CREATE TABLE IF NOT EXISTS user_promos (user_id INTEGER, code TEXT, PRIMARY KEY (user_id, code))")
     cursor.execute("CREATE TABLE IF NOT EXISTS tickets (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, question TEXT, answer TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, expire_time REAL)")
+    cursor.execute("CREATE TABLE IF NOT EXISTS chat (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, text TEXT, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
     conn.commit()
     conn.close()
 
@@ -80,8 +81,8 @@ async def send_admin_log(text):
     try:
         async with aiohttp.ClientSession() as session: 
             await session.post(url, json=payload)
-    except: 
-        pass
+    except: pass
+
 async def api_profile(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
@@ -91,7 +92,6 @@ async def api_profile(request):
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user["id"], user.get("username", "")))
     conn.commit()
-    
     profile = get_user(user["id"])
     
     if profile["balance"] >= 500 and profile["gift_claimed"] == 0:
@@ -103,9 +103,11 @@ async def api_profile(request):
     cursor.execute("SELECT item_name, price, date FROM purchases WHERE user_id = ? ORDER BY id DESC LIMIT 10", (user["id"],))
     purchases = [{"name": r[0], "price": r[1], "date": r[2]} for r in cursor.fetchall()]
     
+    cursor.execute("SELECT item_name FROM purchases WHERE user_id = ? AND item_name NOT LIKE '%Кейс%' AND item_name NOT LIKE '%Промокод%'", (user["id"],))
+    my_accounts = [r[0] for r in cursor.fetchall()]
+    
     cursor.execute("SELECT country, amount FROM stock")
     stock_dict = {row[0]: row[1] for row in cursor.fetchall()}
-    
     shop_items = [{"code": k, "name": v["name"], "price": v["price"], "stock": stock_dict.get(k, 0)} for k, v in COUNTRIES.items()]
     
     tickets = []
@@ -115,364 +117,360 @@ async def api_profile(request):
     else:
         cursor.execute("SELECT id, question, answer FROM tickets WHERE user_id = ? ORDER BY id DESC", (user["id"],))
         tickets = [{"id": r[0], "question": r[1], "answer": r[2]} for r in cursor.fetchall()]
+    conn.close()
+    return web.json_response({"status": "ok", "profile": profile, "purchases": purchases, "my_accounts": my_accounts, "shop": shop_items, "is_admin": user["id"] in ADMIN_IDS, "tickets": tickets})
+
+# Остальные функции оставляем как были (events, roll, buy, topup, case, promo, ticket, admin, chat)
+# ...
+# В самом низу добавь эти роуты (если их нет):
+# app.router.add_post('/api/admin/clear_events', api_clear_events)
+# app.router.add_post('/api/chat', api_chat)
+# app.router.add_get('/api/chat', api_chat)
+const tg = window.Telegram?.WebApp;
+if (tg) tg.expand();
+const API_URL = "https://sciptyy-api.onrender.com";
+
+let userProfile = { balance: 0, cases: 0, vip_cases: 0, discount: 0 };
+let accountsData = [];
+let myAccounts = []; // Список купленных аккаунтов для апгрейда
+let selectedCountry = null;
+let isAdmin = false;
+
+// Загрузка данных
+async function loadData() {
+    if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
+        const u = tg.initDataUnsafe.user;
+        document.getElementById('user-name').innerText = u.first_name;
+        document.getElementById('user-id').innerText = `ID: ${u.id}`;
+        const avatar = document.getElementById('user-avatar');
+        if (u.photo_url) { avatar.style.backgroundImage = `url('${u.photo_url}')`; avatar.innerText = ''; }
+        else { avatar.innerText = u.first_name.charAt(0).toUpperCase(); }
+    }
+
+    try {
+        const res = await fetch(`${API_URL}/api/profile`, { headers: { "X-Telegram-Init-Data": tg.initData } });
+        const data = await res.json();
+        if (data.status === "ok") {
+            userProfile = data.profile;
+            accountsData = data.shop;
+            myAccounts = data.my_accounts || []; // Сохраняем аккаунты
+            isAdmin = data.is_admin;
+            
+            if (isAdmin) {
+                document.getElementById('admin-btn').style.display = 'block';
+                document.getElementById('admin-tickets-btn').style.display = 'block';
+            }
+            if (userProfile.cases > 0) document.getElementById('open-normal-case').style.display = 'block';
+            if (userProfile.vip_cases > 0) document.getElementById('open-vip-case').style.display = 'block';
+            
+            document.getElementById('profile-balance').innerText = `${userProfile.balance.toFixed(2)} ₽`;
+            
+            const pDiv = document.getElementById('profile-purchases');
+            pDiv.innerHTML = data.purchases.length > 0 ? data.purchases.map(p => `
+                <div class="purchase-item">
+                    <div style="font-weight: bold; color: #00d2ff;">${p.name}</div>
+                    <div style="color: #888;">${p.price} ₽ • ${p.date.split(' ')[0]}</div>
+                </div>`).join('') : '<div style="color:#888;">Покупок нет</div>';
+            renderTickets(data.tickets);
+        }
+    } catch(e) { console.log(e); }
+}
+
+// События (бегущая строка)
+async function loadEvents() {
+    try {
+        const res = await fetch(`${API_URL}/api/events`);
+        const data = await res.json();
+        const track = document.getElementById('ticker-track');
+        if (data.status === 'ok' && data.events.length > 0) track.innerText = data.events.join('  •  ') + '  •  ';
+        else track.innerText = "Добро пожаловать в Sciptyy Store!  •  ";
+    } catch(e) {}
+}
+setInterval(loadEvents, 10000);
+loadEvents();
+
+function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    if(id === 'screen-profile' || id === 'screen-main' || id === 'screen-admin-tickets') loadData();
+    if(id === 'screen-chat') loadChat();
+}
+
+// Каталог
+function openCatalog() {
+    const grid = document.getElementById('catalog-grid');
+    grid.innerHTML = '';
+    accountsData.forEach(item => {
+        const stockColor = item.stock > 0 ? '#00d2ff' : '#ff4444';
+        const stockText = item.stock > 0 ? `В наличии: ${item.stock}` : 'Нет в наличии';
+        grid.innerHTML += `
+            <div class="product-card">
+                <div class="product-name">${item.name}</div>
+                <div class="product-price">${item.price} ₽</div>
+                <div style="color:${stockColor}; font-size:11px; margin-bottom:5px;">${stockText}</div>
+                <button class="buy-btn" ${item.stock <= 0 ? 'disabled' : ''} onclick="openModal('${item.code}', '${item.name}', ${item.price}, ${item.stock})">Купить</button>
+            </div>`;
+    });
+    showScreen('screen-catalog');
+}
+
+function openModal(code, name, price, stock) {
+    if(stock <= 0) return;
+    selectedCountry = code;
+    document.getElementById('modal-title').innerText = name;
+    document.getElementById('modal-price').innerText = `Цена: ${price} ₽`;
+    document.getElementById('modal-buy').style.display = 'flex';
+}
+function closeModal() { document.getElementById('modal-buy').style.display = 'none'; }
+
+async function buyItem(method) {
+    closeModal();
+    if (method === 'stars') {
+        // Логика звезд
+        return;
+    }
+    tg.showAlert("Списываем средства...");
+    const res = await fetch(`${API_URL}/api/buy`, {
+        method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" },
+        body: JSON.stringify({ country: selectedCountry })
+    });
+    const data = await res.json();
+    tg.showAlert(data.status === 'ok' ? "✅ Деньги списаны!" : `❌ ${data.error}`);
+    loadData(); loadEvents();
+}
+
+// Рулетка
+async function spinWheel() {
+    const res = await fetch(`${API_URL}/api/roll`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData } });
+    const data = await res.json();
+    if(data.status === 'ok') {
+        // Анимация и показ результата...
+        document.getElementById('roll-result').innerText = `🎉 Вы выиграли: ${data.prize}`;
+        loadData();
+    } else tg.showAlert(data.error);
+}
+
+// Кейсы
+async function buyCase(type) {
+    tg.showConfirm(`Купить кейс?`, async (confirmed) => {
+        if (!confirmed) return;
+        const res = await fetch(`${API_URL}/api/case/buy`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ type }) });
+        const data = await res.json();
+        tg.showAlert(data.message || data.error);
+        loadData();
+    });
+}
+
+async function openCase(type) {
+    const animDiv = document.getElementById('case-animation');
+    const track = document.getElementById('roulette-track');
+    const winContainer = document.getElementById('win-card-container');
+    const winContent = document.getElementById('win-card-content');
+    
+    animDiv.style.display = 'block';
+    winContainer.style.display = 'none';
+    track.style.transition = 'none';
+    track.style.transform = 'translateX(0)';
+    track.innerHTML = '';
+    
+    const res = await fetch(`${API_URL}/api/case/open`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ type }) });
+    const data = await res.json();
+    
+    if (data.status === 'ok') {
+        const winIndex = 25; 
+        let itemsHTML = '';
+        for (let i = 0; i < 30; i++) {
+            const prize = data.prize;
+            if (i === winIndex) {
+                if (prize.type === 'money') itemsHTML += `<div class="roulette-item money">💰<br>${prize.value}</div>`;
+                else if (prize.type === 'promo') itemsHTML += `<div class="roulette-item promo">🎁<br>Скидка</div>`;
+                else itemsHTML += `<div class="roulette-item account">🌍<br>${prize.value}</div>`;
+            } else {
+                const rnd = Math.random();
+                if (rnd < 0.4) itemsHTML += `<div class="roulette-item money">💰<br>Рубли</div>`;
+                else if (rnd < 0.7) itemsHTML += `<div class="roulette-item promo">🎁<br>Промо</div>`;
+                else itemsHTML += `<div class="roulette-item account">🌍<br>Аккаунт</div>`;
+            }
+        }
+        track.innerHTML = itemsHTML;
         
-    conn.close()
-    return web.json_response({"status": "ok", "profile": profile, "purchases": purchases, "shop": shop_items, "is_admin": user["id"] in ADMIN_IDS, "tickets": tickets})
+        setTimeout(() => {
+            track.style.transition = 'transform 5s cubic-bezier(0.1, 0.8, 0.1, 1)';
+            const finalX = -((winIndex * 100) - (window.innerWidth / 2) + 45);
+            track.style.transform = `translateX(${finalX}px)`;
+            
+            setTimeout(() => {
+                let prizeStr = "";
+                if (data.prize.type === 'money') prizeStr = `<div style="font-size:18px; color:#00d2ff; margin-top:10px;">Вы выиграли <b>${data.prize.value}</b>!</div>`;
+                if (data.prize.type === 'promo') prizeStr = `<div style="font-size:14px; margin-top:10px;">Промокод:<br><b style="font-size:20px; color:#ffd700;">${data.prize.code}</b></div>`;
+                if (data.prize.type === 'account') prizeStr = `<div style="font-size:16px; margin-top:10px;">Аккаунт <b>${data.prize.value}</b><br><span style="font-size:11px; color:#aaa;">Напишите в поддержку!</span></div>`;
+                
+                winContent.innerHTML = `<div style="font-size:50px; text-align:center;">🎁</div><div style="font-size:18px; font-weight:900; color:#ffd700; text-align:center; margin-top:10px;">ПОЗДРАВЛЯЕМ!</div>`;
+                document.getElementById('case-prize-text').innerHTML = prizeStr;
+                winContainer.style.display = 'flex';
+                tg.showAlert("Ваш приз получен!");
+                loadData(); loadEvents();
+            }, 5200); 
+        }, 100);
+    } else {
+        tg.showAlert(data.error); animDiv.style.display = 'none';
+    }
+}
 
-async def api_events(request):
-    now = time.time()
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM events WHERE expire_time < ?", (now,))
-    conn.commit()
-    cursor.execute("SELECT text FROM events ORDER BY id DESC LIMIT 5")
-    events = [r[0] for r in cursor.fetchall()]
-    conn.close()
-    return web.json_response({"status": "ok", "events": events})
+// ЧАТ
+async function loadChat() {
+    const res = await fetch(`${API_URL}/api/chat`, { headers: { "X-Telegram-Init-Data": tg.initData } });
+    const data = await res.json();
+    if(data.status === 'ok') {
+        const chatBox = document.getElementById('chat-messages');
+        chatBox.innerHTML = data.messages.map(m => `
+            <div class="chat-msg ${m.user_id === tg.initDataUnsafe.user.id ? 'mine' : 'other'}">
+                <div class="chat-author">${m.username}</div>
+                <div>${m.text}</div>
+            </div>
+        `).join('');
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+}
+setInterval(() => { if(document.getElementById('screen-chat').classList.contains('active')) loadChat(); }, 5000);
 
-async def api_roll(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    profile = get_user(user["id"])
-    now = int(time.time())
-    
-    if user["id"] not in ADMIN_IDS and now - profile["last_roll"] < 86400:
-        left = 86400 - (now - profile["last_roll"])
-        return web.json_response({"error": f"Ждать: {left//3600} ч {(left%3600)//60} мин"}, status=400)
-        
-    amount = random.randint(1, 3)
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + ?, last_roll = ? WHERE user_id = ?", (amount, now, user["id"]))
-    conn.commit()
-    conn.close()
-    return web.json_response({"status": "ok", "prize": f"{amount} ₽", "amount": amount})
+async function sendChatMessage() {
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if(!text) return;
+    input.value = "";
+    await fetch(`${API_URL}/api/chat`, {
+        method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+    });
+    loadChat();
+}
 
-async def api_buy(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    data = await request.json()
-    country = data.get("country")
-    if country not in COUNTRIES: return web.json_response({"error": "Товар не найден"}, status=404)
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT amount FROM stock WHERE country = ?", (country,))
-    stock = cursor.fetchone()
-    if not stock or stock[0] <= 0:
-        conn.close()
-        return web.json_response({"error": "Нет в наличии"}, status=400)
-        
-    info = COUNTRIES[country]
-    profile = get_user(user["id"])
-    final_price = int(info["price"] * (1 - profile["discount"] / 100))
-    if final_price < 1: final_price = 1
-    
-    if profile["balance"] < final_price:
-        conn.close()
-        return web.json_response({"error": "Недостаточно средств"}, status=400)
-        
-    cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (final_price, user["id"]))
-    cursor.execute("UPDATE stock SET amount = amount - 1 WHERE country = ?", (country,))
-    cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], info["name"], final_price))
-    event_text = f"🛒 @{user.get('username', 'user')} купил аккаунт {info['name']}"
-    cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (event_text, time.time() + 3600))
-    conn.commit()
-    conn.close()
-    
-    await send_admin_log(f"🛒 <b>Покупка (Сайт)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽")
-    return web.json_response({"status": "ok", "message": "Деньги списаны! Ожидайте выдачи.", "item": info["name"]})
-async def api_buy_stars_invoice(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    
-    data = await request.json()
-    country = data.get("country")
-    if country not in COUNTRIES: return web.json_response({"error": "Товар не найден"}, status=404)
-    
-    info = COUNTRIES[country]
-    stars = info.get("stars", info["price"])
-    
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
-    payload = {"title": f"Аккаунт {info['name']}", "description": "Оплата. Выдача вручную.", "payload": f"acc_stars_{country}", "currency": "XTR", "prices": [{"label": "Аккаунт", "amount": stars}]}
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload) as resp:
-            res = await resp.json()
-            if res.get("ok"): return web.json_response({"status": "ok", "url": res["result"]})
-            return web.json_response({"error": "Ошибка Telegram API"}, status=500)
+// АПГРЕЙД
+let upgradeSlot1 = null; let upgradeSlot2 = null;
 
-async def api_topup(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
+function selectSlot(slotNum) {
+    if(myAccounts.length === 0) return tg.showAlert("У вас нет аккаунтов для апгрейда.");
     
-    data = await request.json()
-    amount = float(data.get("amount", 0))
-    if amount < 50: return web.json_response({"error": "Минимум 50 рублей"}, status=400)
+    let msg = "Выберите аккаунт:\n";
+    myAccounts.forEach((acc, i) => msg += `${i + 1}. ${acc}\n`);
+    const choice = prompt(msg + "\nВведите номер:");
+    if(!choice) return;
     
-    headers = {"X-Api-Key": LAVA_API_KEY, "Content-Type": "application/json"}
-    payload = {"email": LAVA_EMAIL, "offerId": LAVA_TOPUP_OFFER_ID, "currency": "RUB", "amount": amount, "clientUtm": {"source": "site_topup", "clientId": str(user["id"])}}
+    const acc = myAccounts[parseInt(choice) - 1];
+    if(!acc) return tg.showAlert("Неверный номер.");
     
-    async with aiohttp.ClientSession() as session:
-        async with session.post("https://gate.lava.top/api/v3/invoice", json=payload, headers=headers) as resp:
-            if resp.status in (200, 201):
-                res_data = await resp.json()
-                return web.json_response({"url": res_data.get("url") or res_data.get("paymentUrl")})
-            return web.json_response({"error": "Ошибка Lava API"}, status=500)
+    tg.showConfirm(`Поставить "${acc}" в слот ${slotNum}?`, (confirmed) => {
+        if(!confirmed) return;
+        if(slotNum === 1) { upgradeSlot1 = acc; document.getElementById('slot-1').innerHTML = `<div style="font-size:12px; color:#ffd700;">${acc}</div>`; document.getElementById('slot-1').classList.add('filled'); }
+        else { upgradeSlot2 = acc; document.getElementById('slot-2').innerHTML = `<div style="font-size:12px; color:#ffd700;">${acc}</div>`; document.getElementById('slot-2').classList.add('filled'); }
+        checkUpgrade();
+    });
+}
 
-async def api_case_buy(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    
-    data = await request.json()
-    case_type = data.get("type")
-    price = 99 if case_type == "normal" else 249
-    
-    profile = get_user(user["id"])
-    if profile["balance"] < price: return web.json_response({"error": "Недостаточно средств"}, status=400)
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user["id"]))
-    if case_type == "normal": 
-        cursor.execute("UPDATE users SET cases = cases + 1 WHERE user_id = ?", (user["id"],))
-    else: 
-        cursor.execute("UPDATE users SET vip_cases = vip_cases + 1 WHERE user_id = ?", (user["id"],))
-    conn.commit()
-    conn.close()
-    
-    return web.json_response({"status": "ok", "message": "Кейс куплен!"})
+function checkUpgrade() {
+    const btn = document.getElementById('upgrade-btn');
+    if(upgradeSlot1 && upgradeSlot2 && upgradeSlot1 === upgradeSlot2) {
+        btn.disabled = false; btn.style.opacity = '1'; btn.style.background = 'linear-gradient(90deg, #00d2ff, #0052ff)';
+    } else {
+        btn.disabled = true; btn.style.opacity = '0.5'; btn.style.background = '#333';
+    }
+}
 
-async def api_case_open(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    
-    data = await request.json()
-    case_type = data.get("type")
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    profile = get_user(user["id"])
-    
-    if case_type == "normal" and profile["cases"] <= 0:
-        conn.close()
-        return web.json_response({"error": "Нет кейсов"}, status=400)
-    if case_type == "vip" and profile["vip_cases"] <= 0:
-        conn.close()
-        return web.json_response({"error": "Нет кейсов"}, status=400)
-        
-    if case_type == "normal":
-        cursor.execute("UPDATE users SET cases = cases - 1 WHERE user_id = ?", (user["id"],))
-    else:
-        cursor.execute("UPDATE users SET vip_cases = vip_cases - 1 WHERE user_id = ?", (user["id"],))
-        
-    roll = random.randint(1, 100)
-    prize = {}
-    
-    if roll <= 40:
-        amount = random.randint(5, 10) if case_type == "normal" else random.randint(30, 50)
-        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user["id"]))
-        prize = {"type": "money", "value": f"{amount} ₽"}
-        event_text = f"💰 @{user.get('username', 'user')} открыл {case_type.upper()}-кейс и выиграл {amount} ₽"
-        cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: {amount} ₽", 0))
-    elif roll <= 70:
-        disc = random.randint(5, 15) if case_type == "normal" else random.randint(15, 50)
-        code = f"BOX-{disc}-{random.randint(1000, 9999)}"
-        cursor.execute("INSERT INTO promos (code, discount, limit_count) VALUES (?, ?, ?)", (code, disc, 1))
-        prize = {"type": "promo", "value": f"Промокод на {disc}%", "code": code}
-        event_text = f"🎁 @{user.get('username', 'user')} открыл {case_type.upper()}-кейс и выиграл промокод"
-        cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: Промокод {code}", 0))
-    else:
-        country = random.choice(list(COUNTRIES.keys()))
-        prize = {"type": "account", "value": COUNTRIES[country]["name"]}
-        event_text = f"🔥 @{user.get('username', 'user')} открыл {case_type.upper()}-кейс и выиграл аккаунт {prize['value']}"
-        cursor.execute("INSERT INTO purchases (user_id, item_name, price) VALUES (?, ?, ?)", (user["id"], f"Кейс: Аккаунт {prize['value']}", 0))
-        
-    cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (event_text, time.time() + 3600))
-    conn.commit()
-    conn.close()
-    
-    await send_admin_log(f"🎁 <b>Кейс (Сайт)</b>\n👤 @{user.get('username', '')}\n🎁 {prize['value']}")
-    return web.json_response({"status": "ok", "prize": prize})
+function startUpgrade() {
+    tg.showAlert("Функция апгрейда в разработке (скоро будет)!");
+}
 
-async def api_promo_activate(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    
-    data = await request.json()
-    code = data.get("code", "").strip().upper()
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT discount, limit_count, used_count FROM promos WHERE code = ?", (code,))
-    promo = cursor.fetchone()
-    if not promo:
-        conn.close()
-        return web.json_response({"error": "Такого промокода нет"}, status=400)
-        
-    discount, limit_count, used_count = promo
-    if used_count >= limit_count:
-        conn.close()
-        return web.json_response({"error": "Лимит активаций исчерпан"}, status=400)
-        
-    cursor.execute("SELECT * FROM user_promos WHERE user_id = ? AND code = ?", (user["id"], code))
-    if cursor.fetchone():
-        conn.close()
-        return web.json_response({"error": "Вы уже активировали этот код"}, status=400)
-        
-    cursor.execute("UPDATE users SET discount = ? WHERE user_id = ?", (discount, user["id"]))
-    cursor.execute("INSERT INTO user_promos (user_id, code) VALUES (?, ?)", (user["id"], code))
-    cursor.execute("UPDATE promos SET used_count = used_count + 1 WHERE code = ?", (code,))
-    conn.commit()
-    conn.close()
-    return web.json_response({"status": "ok", "message": f"Промокод активирован! Скидка {discount}%"})
+// Админка и тикеты
+async function createTicket() {
+    const text = document.getElementById('ticket-input').value.trim();
+    if(!text) return tg.showAlert("Напишите вопрос!");
+    const res = await fetch(`${API_URL}/api/ticket/create`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ question: text }) });
+    const data = await res.json();
+    tg.showAlert(data.message || data.error);
+    if(data.status === 'ok') { document.getElementById('ticket-input').value = ""; loadData(); }
+}
 
-async def api_create_ticket(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user: return web.json_response({"error": "Unauthorized"}, status=401)
-    data = await request.json()
-    question = data.get("question", "").strip()
-    if not question: return web.json_response({"error": "Пустой вопрос"}, status=400)
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO tickets (user_id, username, question) VALUES (?, ?, ?)", (user["id"], user.get("username", ""), question))
-    conn.commit()
-    conn.close()
-    
-    await send_admin_log(f"📩 <b>Новый тикет!</b>\n👤 @{user.get('username', '')}\n💬 {question}")
-    return web.json_response({"status": "ok", "message": "Тикет создан!"})
+function renderTickets(tickets) {
+    const adminList = document.getElementById('admin-ticket-list');
+    const list = document.getElementById('ticket-list');
+    if (isAdmin) {
+        adminList.innerHTML = tickets.length > 0 ? tickets.map(t => `<div class="purchase-item"><div>@${t.username}: ${t.question}</div><button onclick="replyTicket(${t.id})">Ответить</button></div>`).join('') : 'Нет тикетов.';
+    } else {
+        list.innerHTML = tickets.map(t => `<div class="purchase-item"><div>${t.question}</div><div>${t.answer ? 'Ответ: '+t.answer : 'Ожидает...'}</div></div>`).join('');
+    }
+}
 
-async def api_reply_ticket(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
-    data = await request.json()
-    ticket_id = data.get("ticket_id")
-    answer = data.get("answer", "").strip()
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE tickets SET answer = ? WHERE id = ?", (answer, ticket_id))
-    cursor.execute("SELECT user_id FROM tickets WHERE id = ?", (ticket_id,))
-    target_user = cursor.fetchone()
-    conn.commit()
-    conn.close()
-    
-    if target_user:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": target_user[0], "text": f"💬 <b>Ответ поддержки:</b>\n\n{answer}", "parse_mode": "HTML"}
-        async with aiohttp.ClientSession() as session: await session.post(url, json=payload)
-    return web.json_response({"status": "ok", "message": "Ответ отправлен!"})
+async function replyTicket(id) {
+    const answer = prompt("Ответ:");
+    if(!answer) return;
+    const res = await fetch(`${API_URL}/api/ticket/reply`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ ticket_id: id, answer }) });
+    const data = await res.json(); tg.showAlert(data.message || data.error); loadData();
+}
 
-async def api_admin_broadcast(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
-    data = await request.json()
-    text = data.get("text", "").strip()
-    minutes = int(data.get("minutes", 60))
-    if not text: return web.json_response({"error": "Пустой текст"}, status=400)
-    
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        expire_time = time.time() + (minutes * 60)
-        cursor.execute("INSERT INTO events (text, expire_time) VALUES (?, ?)", (text, expire_time))
-        conn.commit()
-        conn.close()
-        asyncio.create_task(send_admin_log(f"📢 <b>Рассылка (Сайт):</b>\n{text}\n<i>Будет видно {minutes} мин.</i>"))
-        return web.json_response({"status": "ok", "message": "Текст доставлен и добавлен в события!"})
-    except Exception as e:
-        return web.json_response({"error": str(e)}, status=500)
+async function adminAction(action) {
+    const resDiv = document.getElementById('admin-result');
+    resDiv.innerText = "Загрузка...";
+    if (action === 'money') {
+        const amount = prompt("Сумма:"); if(!amount) return;
+        const res = await fetch(`${API_URL}/api/admin/money`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ amount: parseFloat(amount) }) });
+        const data = await res.json(); resDiv.innerText = data.message || data.error; loadData();
+    }
+    if (action === 'promo') {
+        const code = prompt("Код:"); const disc = prompt("Скидка:"); const limit = prompt("Лимит:");
+        const res = await fetch(`${API_URL}/api/admin/promo`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ code, discount: parseInt(disc), limit: parseInt(limit) }) });
+        const data = await res.json(); resDiv.innerText = data.message || data.error;
+    }
+    if (action === 'stock') {
+        const country = prompt("Код страны:"); const amount = prompt("Кол-во:");
+        const res = await fetch(`${API_URL}/api/admin/stock`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ country, amount: parseInt(amount) }) });
+        const data = await res.json(); resDiv.innerText = data.message || data.error; loadData();
+    }
+    if (action === 'broadcast') {
+        const text = prompt("Текст:"); if(!text) return;
+        const res = await fetch(`${API_URL}/api/admin/broadcast`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ text, minutes: 60 }) });
+        const data = await res.json(); resDiv.innerText = data.message || data.error; loadEvents();
+    }
+}
 
-async def api_admin_money(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
-    data = await request.json()
-    amount = float(data.get("amount", 0))
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user["id"]))
-    conn.commit()
-    conn.close()
-    return web.json_response({"status": "ok", "message": f"Начислено {amount} ₽"})
+async function clearEvents() {
+    const resDiv = document.getElementById('admin-result');
+    resDiv.innerText = "Очистка...";
+    const res = await fetch(`${API_URL}/api/admin/clear_events`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData } });
+    const data = await res.json(); resDiv.innerText = data.message || data.error; loadEvents();
+}
 
-async def api_admin_stock(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
-    data = await request.json()
-    country = data.get("country")
-    amount = int(data.get("amount", 0))
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO stock (country, amount) VALUES (?, ?)", (country, amount))
-    conn.commit()
-    conn.close()
-    return web.json_response({"status": "ok", "message": "Склад обновлен"})
+// Инфо и пополнение
+function openInfo(type) {
+    if(type === 'promo') {
+        document.getElementById('info-title').innerText = "🎁 Промокод";
+        document.getElementById('info-content').innerHTML = `<input type="text" id="promo-input" placeholder="Код" style="width:100%; padding:15px; margin-bottom:10px; background:rgba(255,255,255,0.1); border:none; color:white; border-radius:10px;"><button class="info-btn" onclick="activatePromo()">Активировать</button>`;
+        showScreen('screen-info'); return;
+    }
+    // ... другие инфо ...
+}
 
-async def api_admin_promo(request):
-    init_data = request.headers.get("X-Telegram-Init-Data")
-    user = validate_init_data(init_data)
-    if not user or user["id"] not in ADMIN_IDS: return web.json_response({"error": "Доступ запрещен"}, status=403)
-    data = await request.json()
-    code = data.get("code", "").strip().upper()
-    discount = int(data.get("discount", 5))
-    limit = int(data.get("limit", 1))
-    if not code: return web.json_response({"error": "Пустой код"}, status=400)
-    
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO promos (code, discount, limit_count) VALUES (?, ?, ?)", (code, discount, limit))
-        conn.commit()
-        res = {"status": "ok", "message": f"Промокод {code} создан"}
-    except sqlite3.IntegrityError:
-        res = {"error": "Такой промокод уже есть"}
-    conn.close()
-    return web.json_response(res)
+async function activatePromo() {
+    const code = document.getElementById('promo-input').value.trim().toUpperCase();
+    const res = await fetch(`${API_URL}/api/promo`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
+    const data = await res.json(); tg.showAlert(data.status === 'ok' ? data.message : data.error); if(data.status === 'ok') loadData();
+}
 
-async def api_ping(request):
-    return web.json_response({"status": "ok"})
+function showTopupModal() { document.getElementById('modal-topup').style.display = 'flex'; }
+function closeTopup() { document.getElementById('modal-topup').style.display = 'none'; }
+async function topupBalance() {
+    const amount = parseFloat(document.getElementById('topup-amount').value);
+    if(!amount || amount < 50) return tg.showAlert("Минимум 50 ₽");
+    closeTopup(); tg.showAlert("Создаем счет...");
+    const res = await fetch(`${API_URL}/api/topup`, { method: 'POST', headers: { "X-Telegram-Init-Data": tg.initData, "Content-Type": "application/json" }, body: JSON.stringify({ amount }) });
+    const data = await res.json();
+    if(data.url) tg.openLink(data.url); else tg.showAlert("Ошибка: " + data.error);
+}
 
-@web.middleware
-async def cors_middleware(request, handler):
-    if request.method == "OPTIONS": 
-        response = web.Response()
-    else: 
-        response = await handler(request)
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'X-Telegram-Init-Data, Content-Type'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    return response
-
-app = web.Application(middlewares=[cors_middleware])
-app.router.add_get('/ping', api_ping)
-app.router.add_get('/api/profile', api_profile)
-app.router.add_get('/api/events', api_events)
-app.router.add_post('/api/roll', api_roll)
-app.router.add_post('/api/buy', api_buy)
-app.router.add_post('/api/buy_stars', api_buy_stars_invoice)
-app.router.add_post('/api/topup', api_topup)
-app.router.add_post('/api/case/buy', api_case_buy)
-app.router.add_post('/api/case/open', api_case_open)
-app.router.add_post('/api/ticket/create', api_create_ticket)
-app.router.add_post('/api/ticket/reply', api_reply_ticket)
-app.router.add_post('/api/admin/money', api_admin_money)
-app.router.add_post('/api/admin/stock', api_admin_stock)
-app.router.add_post('/api/admin/promo', api_admin_promo)
-app.router.add_post('/api/admin/broadcast', api_admin_broadcast)
-app.router.add_post('/api/promo', api_promo_activate)
-
-if __name__ == '__main__':
-    web.run_app(app, host='0.0.0.0', port=PORT)
+// Инициализация
+if (tg) {
+    tg.ready();
+    loadData();
+    loadEvents();
+    setInterval(loadData, 15000);
+}

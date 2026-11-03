@@ -445,7 +445,6 @@ async def api_admin_promo(request):
         res = {"error": "Такой промокод уже есть"}
     conn.close()
     return web.json_response(res)
-
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == "OPTIONS": 
@@ -457,7 +456,11 @@ async def cors_middleware(request, handler):
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     return response
 
+async def api_ping(request):
+    return web.json_response({"status": "ok"})
+
 app = web.Application(middlewares=[cors_middleware])
+app.router.add_get('/ping', api_ping)
 app.router.add_get('/api/profile', api_profile)
 app.router.add_get('/api/events', api_events)
 app.router.add_post('/api/roll', api_roll)
@@ -473,7 +476,5 @@ app.router.add_post('/api/admin/stock', api_admin_stock)
 app.router.add_post('/api/admin/promo', api_admin_promo)
 app.router.add_post('/api/admin/broadcast', api_admin_broadcast)
 app.router.add_post('/api/promo', api_promo_activate)
-
 if __name__ == '__main__':
     web.run_app(app, host='0.0.0.0', port=PORT)
-    

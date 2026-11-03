@@ -82,7 +82,6 @@ async def send_admin_log(text):
             await session.post(url, json=payload)
     except: 
         pass
-        
 async def api_profile(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
@@ -189,14 +188,17 @@ async def api_buy_stars_invoice(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
+    
     data = await request.json()
     country = data.get("country")
     if country not in COUNTRIES: return web.json_response({"error": "Товар не найден"}, status=404)
+    
     info = COUNTRIES[country]
     stars = info.get("stars", info["price"])
     
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
     payload = {"title": f"Аккаунт {info['name']}", "description": "Оплата. Выдача вручную.", "payload": f"acc_stars_{country}", "currency": "XTR", "prices": [{"label": "Аккаунт", "amount": stars}]}
+    
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload) as resp:
             res = await resp.json()
@@ -207,6 +209,7 @@ async def api_topup(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
+    
     data = await request.json()
     amount = float(data.get("amount", 0))
     if amount < 50: return web.json_response({"error": "Минимум 50 рублей"}, status=400)
@@ -244,7 +247,8 @@ async def api_case_buy(request):
     conn.close()
     
     return web.json_response({"status": "ok", "message": "Кейс куплен!"})
-    async def api_case_open(request):
+
+async def api_case_open(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
@@ -301,6 +305,7 @@ async def api_promo_activate(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
+    
     data = await request.json()
     code = data.get("code", "").strip().upper()
     
@@ -328,6 +333,7 @@ async def api_promo_activate(request):
     conn.commit()
     conn.close()
     return web.json_response({"status": "ok", "message": f"Промокод активирован! Скидка {discount}%"})
+
 async def api_create_ticket(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)

@@ -33,7 +33,7 @@ COUNTRIES = {
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, discount INTEGER DEFAULT 0, balance REAL DEFAULT 0, last_roll INTEGER DEFAULT 0, last_prize TEXT DEFAULT '', referrer_id INTEGER DEFAULT 0, ref_earnings REAL DEFAULT 0, cases INTEGER DEFAULT 0, vip_cases INTEGER DEFAULT 0)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, discount INTEGER DEFAULT 0, balance REAL DEFAULT 0, last_roll INTEGER DEFAULT 0, last_prize TEXT DEFAULT '', referrer_id INTEGER DEFAULT 0, ref_earnings REAL DEFAULT 0, cases INTEGER DEFAULT 0, vip_cases INTEGER DEFAULT 0, gift_claimed INTEGER DEFAULT 0)''')
     cursor.execute('CREATE TABLE IF NOT EXISTS purchases (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, item_name TEXT, price REAL, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
     cursor.execute('CREATE TABLE IF NOT EXISTS stock (country TEXT PRIMARY KEY, amount INTEGER DEFAULT 0)')
     cursor.execute('CREATE TABLE IF NOT EXISTS promos (code TEXT PRIMARY KEY, discount INTEGER, limit_count INTEGER, used_count INTEGER DEFAULT 0)')
@@ -59,11 +59,11 @@ def validate_init_data(init_data: str) -> dict:
 def get_user(user_id):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT discount, balance, last_roll, cases, vip_cases FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT discount, balance, last_roll, cases, vip_cases, gift_claimed FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     conn.close()
-    if row: return {"discount": row[0], "balance": float(row[1]), "last_roll": row[2], "cases": row[3], "vip_cases": row[4]}
-    return {"discount": 0, "balance": 0.0, "last_roll": 0, "cases": 0, "vip_cases": 0}
+    if row: return {"discount": row[0], "balance": float(row[1]), "last_roll": row[2], "cases": row[3], "vip_cases": row[4], "gift_claimed": row[5]}
+    return {"discount": 0, "balance": 0.0, "last_roll": 0, "cases": 0, "vip_cases": 0, "gift_claimed": 0}
 
 async def send_admin_log(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -80,7 +80,16 @@ async def api_profile(request):
     cursor = conn.cursor()
     cursor.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user["id"], user.get("username", "")))
     conn.commit()
+    
     profile = get_user(user["id"])
+    
+    # Проверка на подарок за пополнение от 500
+    if profile["balance"] >= 500 and profile["gift_claimed"] == 0:
+        cursor.execute("UPDATE users SET cases = cases + 1, gift_claimed = 1 WHERE user_id = ?", (user["id"],))
+        conn.commit()
+        profile["cases"] += 1
+        profile["gift_claimed"] = 1
+    
     cursor.execute("SELECT item_name, price, date FROM purchases WHERE user_id = ? ORDER BY id DESC LIMIT 10", (user["id"],))
     purchases = [{"name": r[0], "price": r[1], "date": r[2]} for r in cursor.fetchall()]
     cursor.execute("SELECT country, amount FROM stock")

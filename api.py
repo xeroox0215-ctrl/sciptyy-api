@@ -225,6 +225,7 @@ async def api_case_buy(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
+    
     data = await request.json()
     case_type = data.get("type")
     price = 99 if case_type == "normal" else 249
@@ -235,13 +236,15 @@ async def api_case_buy(request):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (price, user["id"]))
-    if case_type == "normal": cursor.execute("UPDATE users SET cases = cases + 1 WHERE user_id = ?", (user["id"],))
-    else: cursor.execute("UPDATE users SET vip_cases = vip_cases + 1 WHERE user_id = ?", (user["id"],))
+    if case_type == "normal": 
+        cursor.execute("UPDATE users SET cases = cases + 1 WHERE user_id = ?", (user["id"],))
+    else: 
+        cursor.execute("UPDATE users SET vip_cases = vip_cases + 1 WHERE user_id = ?", (user["id"],))
     conn.commit()
-        conn.close()
+    conn.close()
+    
     return web.json_response({"status": "ok", "message": "Кейс куплен!"})
-
-async def api_case_open(request):
+    async def api_case_open(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)

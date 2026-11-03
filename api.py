@@ -185,7 +185,7 @@ async def api_buy(request):
     
     await send_admin_log(f"🛒 <b>Покупка (Сайт)</b>\n👤 @{user.get('username', '')}\n🌍 {info['name']}\n💰 {final_price} ₽")
     return web.json_response({"status": "ok", "message": "Деньги списаны! Ожидайте выдачи.", "item": info["name"]})
-    async def api_buy_stars_invoice(request):
+async def api_buy_stars_invoice(request):
     init_data = request.headers.get("X-Telegram-Init-Data")
     user = validate_init_data(init_data)
     if not user: return web.json_response({"error": "Unauthorized"}, status=401)
